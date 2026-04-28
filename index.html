@@ -374,4 +374,528 @@ function saveData() {
 function exportToPendrive() {
   const dataStr = "data:text/plain;charset=utf-8," + encodeURIComponent(JSON.stringify(DB, null, 2));
   const dlAnchorElem = document.createElement('a');
-  dlAnchorElem.setAttribute("href",
+  dlAnchorElem.setAttribute("href", dataStr);
+  
+  // Create a nice file name with date, format as .txt
+  const dateStr = new Date().toISOString().split('T')[0];
+  dlAnchorElem.setAttribute("download", `EVM_Backup_${dateStr}.txt`);
+  
+  document.body.appendChild(dlAnchorElem);
+  dlAnchorElem.click();
+  document.body.removeChild(dlAnchorElem);
+  alert("Text file downloaded! Save this file to your Pen Drive.");
+}
+
+// Import from JSON/TXT file (from Pen Drive)
+function importFromPendrive(event) {
+  const file = event.target.files[0];
+  if (!file) return;
+
+  const reader = new FileReader();
+  reader.onload = function(e) {
+    try {
+      const importedDB = JSON.parse(e.target.result);
+      if(importedDB && importedDB.passwords) {
+        if(confirm("Warning: This will overwrite current EVM data. Continue?")) {
+          DB = importedDB;
+          saveData();
+          alert("Backup Restored Successfully!");
+          renderAdminPanel();
+        }
+      } else {
+        alert("Invalid Backup File.");
+      }
+    } catch(err) {
+      alert("Error reading file. Ensure it is a valid backup text file.");
+    }
+  };
+  reader.readAsText(file);
+  event.target.value = '';
+}
+
+function seedLocalDefaults() {
+  DB.posts = [
+    { id:'hb',  title:'Head Boy',          cands:['Aarav Sharma','Ishaan Verma'],   isHouse:false, house:'' },
+    { id:'hg',  title:'Head Girl',          cands:['Ananya Gupta','Diya Mehta'],    isHouse:false, house:'' },
+    { id:'dhb', title:'Deputy Head Boy',    cands:['Vihaan Patel','Arjun Rao'],     isHouse:false, house:'' },
+    { id:'dhg', title:'Deputy Head Girl',   cands:['Myra Iyer','Aanya Reddy'],      isHouse:false, house:'' },
+    { id:'hc_red',    title:'Red House Captain',    cands:['Rohan Bhat','Aditya Nair'],   isHouse:true, house:'red' },
+    { id:'hc_blue',   title:'Blue House Captain',   cands:['Krishna Das','Yash Pillai'],  isHouse:true, house:'blue' },
+    { id:'hc_green',  title:'Green House Captain',  cands:['Aryan Bose','Devansh Sen'],   isHouse:true, house:'green' },
+    { id:'hc_yellow', title:'Yellow House Captain', cands:['Atharv Roy','Shivansh Lal'],  isHouse:true, house:'yellow' }
+  ];
+  DB.terminals = { 'PC-1': {max:500,used:0}, 'PC-2': {max:500,used:0} };
+  DB.admissions = ['123456','2025001','1001','1002'];
+  DB.admissionsUsed = {};
+  DB.candidates = {};
+  DB.votes = {};
+  DB.posts.forEach(post => {
+    post.cands.forEach(cand => {
+      DB.candidates[`${post.id}_${cand}`] = { name: cand };
+      DB.votes[`${post.id}_${cand}`] = 0;
+    });
+  });
+}
+
+/* ============================================================
+   SCREEN MANAGEMENT
+   ============================================================ */
+const SCREENS = ['googleAuthScreen','terminalLoginScreen','admissionLoginScreen','votingScreen'];
+function showScreen(id) {
+  SCREENS.forEach(s => document.getElementById(s).classList.add('hidden'));
+  document.getElementById(id).classList.remove('hidden');
+}
+
+function showTerminalLogin() {
+  showScreen('terminalLoginScreen');
+  document.getElementById('exit-btn').classList.add('hidden');
+  document.getElementById('computerIdInput').value = '';
+  document.getElementById('terminalError').classList.add('hidden');
+  currentTerminal = null; currentAdmission = null; selectedHouse = null;
+}
+
+function showAdmissionLogin() {
+  showScreen('admissionLoginScreen');
+  document.getElementById('exit-btn').classList.remove('hidden');
+  document.getElementById('admissionInput').value = '';
+  document.getElementById('admissionError').classList.add('hidden');
+  document.getElementById('activeTerminalStamp').innerText = `TERMINAL ACTIVE: ${currentTerminal}`;
+}
+
+/* ============================================================
+   VOTER LOGIC
+   ============================================================ */
+function buildUISteps(posts) {
+  let steps = [], hasHouse = false;
+  posts.forEach(p => {
+    if (p.isHouse) {
+      if (!hasHouse) { steps.push({ key:'hc', label:'House Captain' }); hasHouse = true; }
+    } else {
+      steps.push({ key: p.id, label: p.title });
+    }
+  });
+  return steps;
+}
+
+function terminalLogin() {
+  let id  = document.getElementById('computerIdInput').value.trim();
+  let err = document.getElementById('terminalError');
+  if (!DB.terminals[id]) { err.innerText="Error: Terminal ID not recognized."; err.classList.remove('hidden'); return; }
+  if (DB.terminals[id].used >= DB.terminals[id].max) { err.innerText=`Error: Terminal ${id} has reached its max capacity.`; err.classList.remove('hidden'); return; }
+  currentTerminal = id;
+  showAdmissionLogin();
+}
+
+function admissionLogin() {
+  let adm = document.getElementById('admissionInput').value.trim();
+  let err = document.getElementById('admissionError');
+  
+  if (!DB.admissions.includes(adm)) { err.innerText="Error: Admission Number is not registered."; err.classList.remove('hidden'); return; }
+  if (DB.admissionsUsed[adm])       { err.innerText="Error: This Admission Number has already voted."; err.classList.remove('hidden'); return; }
+  if (DB.terminals[currentTerminal].used >= DB.terminals[currentTerminal].max) { alert("Terminal reached capacity. Contact admin."); showTerminalLogin(); return; }
+  
+  currentAdmission = adm;
+  currentStepIndex = 0;
+  selectedHouse = null;
+  showScreen('votingScreen');
+  renderVotingStep();
+}
+
+function selectHouse(houseColor) { selectedHouse = houseColor; renderVotingStep(); }
+
+function renderVotingStep() {
+  let UI_STEPS = buildUISteps(DB.posts);
+  let uiStep   = UI_STEPS[currentStepIndex];
+
+  let stepsHtml = UI_STEPS.map((p, i) => {
+    let done = i < currentStepIndex, active = i === currentStepIndex;
+    return `<span class="step-pill ${done?'done':active?'active':''}">${i+1}. ${p.label.toUpperCase()} ${done?'&#10003;':''}</span>
+            ${i < UI_STEPS.length - 1 ? '<span class="step-arrow">›</span>' : ''}`;
+  }).join('');
+  document.getElementById('stepIndicator').innerHTML = stepsHtml;
+  document.getElementById('postStamp').innerText = `BALLOT SECTION ${currentStepIndex + 1}`;
+  document.getElementById('terminalStatus').innerText = `TERMINAL: ${currentTerminal} | VOTER: #${currentAdmission}`;
+
+  if (uiStep.key === 'hc' && !selectedHouse) {
+    document.getElementById('postTitle').innerText = "Select Your House";
+    document.getElementById('candidatesList').innerHTML = `
+      <button class="candidate-tile" style="justify-content:center;" onclick="selectHouse('red')"><div style="width:16px;height:16px;border-radius:50%;background:var(--red);border:1px solid var(--ink);"></div><div class="cand-name" style="margin-left:5px;">Red House</div></button>
+      <button class="candidate-tile" style="justify-content:center;" onclick="selectHouse('blue')"><div style="width:16px;height:16px;border-radius:50%;background:var(--blue);border:1px solid var(--ink);"></div><div class="cand-name" style="margin-left:5px;">Blue House</div></button>
+      <button class="candidate-tile" style="justify-content:center;" onclick="selectHouse('green')"><div style="width:16px;height:16px;border-radius:50%;background:var(--green);border:1px solid var(--ink);"></div><div class="cand-name" style="margin-left:5px;">Green House</div></button>
+      <button class="candidate-tile" style="justify-content:center;" onclick="selectHouse('yellow')"><div style="width:16px;height:16px;border-radius:50%;background:var(--yellow);border:1px solid var(--ink);"></div><div class="cand-name" style="margin-left:5px;">Yellow House</div></button>`;
+    return;
+  }
+
+  let postObjId = uiStep.key === 'hc' ? `hc_${selectedHouse}` : uiStep.key;
+  let post = DB.posts.find(p => p.id === postObjId);
+  document.getElementById('postTitle').innerText = post.title;
+
+  let candsHtml = '';
+  post.cands.forEach((cand, idx) => {
+    let cData = DB.candidates[`${post.id}_${cand}`];
+    candsHtml += `<button class="candidate-tile" onclick="castVote('${post.id}','${cand}')">
+      <div class="cand-num">${idx + 1}</div>
+      <div><div class="cand-name">${cData ? cData.name : cand}</div><div class="cand-pos">${post.title.toUpperCase()}</div></div>
+    </button>`;
+  });
+  if (uiStep.key === 'hc' && selectedHouse) {
+    candsHtml += `<div style="grid-column:1/-1;margin-top:20px;text-align:center;"><button class="btn" onclick="selectHouse(null)">&#8634; Choose Different House</button></div>`;
+  }
+  document.getElementById('candidatesList').innerHTML = candsHtml;
+}
+
+function castVote(postId, chosenCand) {
+  let key = `${postId}_${chosenCand}`;
+  DB.votes[key] = (DB.votes[key] || 0) + 1;
+
+  currentStepIndex++;
+  let UI_STEPS = buildUISteps(DB.posts);
+
+  if (currentStepIndex >= UI_STEPS.length) {
+    DB.admissionsUsed[currentAdmission] = true;
+    DB.terminals[currentTerminal].used++;
+
+    saveData(); // Save instantly to local storage
+
+    document.getElementById('stepIndicator').innerHTML = '';
+    document.getElementById('postStamp').innerText = 'SECRECY OBSERVED';
+    document.getElementById('postTitle').innerHTML = '<span style="color:var(--green)">BALLOT SEALED</span>';
+    document.getElementById('candidatesList').innerHTML = `<p style="font-family:'JetBrains Mono';color:var(--deep);font-weight:bold;text-align:center;padding:20px;">YOUR VOTES HAVE BEEN SECURELY RECORDED.</p>`;
+    setTimeout(() => showAdmissionLogin(), 2500);
+  } else {
+    renderVotingStep();
+  }
+}
+
+/* ============================================================
+   ADMIN LOGIC
+   ============================================================ */
+function openAdminPrompt() {
+  document.getElementById('admin-prompt-overlay').classList.remove('hidden');
+  document.getElementById('adminPwd').value = '';
+  setTimeout(() => document.getElementById('adminPwd').focus(), 100);
+}
+function closeAdminPrompt() { document.getElementById('admin-prompt-overlay').classList.add('hidden'); }
+
+function submitAdminPwd() {
+  let pwd = document.getElementById('adminPwd').value;
+  if      (pwd === DB.passwords.full)    adminRole = 'full';
+  else if (pwd === DB.passwords.limited) adminRole = 'limited';
+  else { alert("Incorrect Access Code."); return; }
+  closeAdminPrompt();
+  renderAdminPanel();
+}
+
+function closeAdminPanel() { document.getElementById('admin-panel-overlay').classList.add('hidden'); adminRole = null; }
+
+function renderAdminPanel() {
+  document.getElementById('admin-panel-overlay').classList.remove('hidden');
+  let badge = document.getElementById('adminRoleBadge');
+  badge.innerText   = adminRole === 'full' ? 'FULL ACCESS' : 'LIMITED ACCESS';
+  badge.className   = adminRole === 'full' ? 'role-badge role-full' : 'role-badge role-limited';
+  document.getElementById('tab-votes-btn').style.display = adminRole === 'full' ? '' : 'none';
+
+  let statsHtml = '', postOptions = '';
+  DB.posts.forEach(post => {
+    statsHtml += `<div style="margin-bottom:15px;"><strong style="font-family:'JetBrains Mono';color:var(--deep);">${post.title.toUpperCase()}</strong>`;
+    postOptions += `<option value="${post.id}">${post.title}</option>`;
+    post.cands.forEach(cand => {
+      let cData = DB.candidates[`${post.id}_${cand}`];
+      let votes = DB.votes[`${post.id}_${cand}`] || 0;
+      statsHtml += `<div class="stat-row"><span>${cData ? cData.name : cand}</span><strong style="font-size:18px;">${votes}</strong></div>`;
+    });
+    statsHtml += `</div>`;
+  });
+  document.getElementById('adminStats').innerHTML = statsHtml;
+  document.getElementById('editPostSelect').innerHTML = postOptions;
+  document.getElementById('editCandPostSelect').innerHTML = postOptions;
+
+  let termHtml = '';
+  Object.entries(DB.terminals).forEach(([id,t]) => {
+    termHtml += `<div class="stat-row"><span class="mono">${id} (Used: ${t.used}/${t.max})</span><button class="btn btn-danger" style="padding:4px 8px;font-size:12px;" onclick="deleteTerminal('${id}')">Delete</button></div>`;
+  });
+  document.getElementById('terminalList').innerHTML = termHtml;
+
+  let admHtml = '';
+  DB.admissions.forEach(adm => {
+    let used = DB.admissionsUsed[adm];
+    admHtml += `<div class="mono" style="background:#f1f5f9;border:1px solid var(--ink);padding:4px 8px;border-radius:4px;font-size:12px;display:flex;align-items:center;gap:5px;${used?'opacity:0.5;text-decoration:line-through;':''}">
+      ${adm}<span style="cursor:pointer;color:var(--red);font-weight:bold;" onclick="deleteAdmission('${adm}')">✕</span></div>`;
+  });
+  document.getElementById('admissionList').innerHTML = admHtml;
+
+  renderPostManageList();
+  updateVoteDropdown();
+  updateCandSettingsDropdown();
+}
+
+/* ============================================================
+   ADMIN — POSTS & CANDIDATES
+   ============================================================ */
+function addCandToNewPost() {
+  let inp = document.getElementById('newPostCandInput');
+  let name = inp.value.trim(); if (!name) return;
+  if (newPostCands.includes(name)) { alert("Already in list."); return; }
+  newPostCands.push(name); inp.value = '';
+  renderNewPostCandList();
+}
+function removeCandFromNewPost(name) { newPostCands = newPostCands.filter(c=>c!==name); renderNewPostCandList(); }
+function renderNewPostCandList() {
+  document.getElementById('newPostCandList').innerHTML = newPostCands.map(c=>
+    `<span class="cand-tag">${c}<button class="remove-cand" onclick="removeCandFromNewPost('${c}')">✕</button></span>`
+  ).join('') || '<span style="font-family:JetBrains Mono;font-size:12px;opacity:.5;">No candidates yet...</span>';
+}
+
+function createNewPost() {
+  let title = document.getElementById('newPostTitle').value.trim();
+  let id    = document.getElementById('newPostId').value.trim().replace(/\s+/g,'_').toLowerCase();
+  if (!title || !id) { alert("Enter a Post Title and Post ID."); return; }
+  if (newPostCands.length < 2) { alert("Add at least 2 candidates."); return; }
+  if (DB.posts.find(p=>p.id===id)) { alert("Post ID already exists."); return; }
+
+  let newPost = { id, title, cands: [...newPostCands], isHouse: false, house: '' };
+  DB.posts.push(newPost);
+  newPost.cands.forEach(cand => {
+    DB.candidates[`${id}_${cand}`] = { name: cand };
+    DB.votes[`${id}_${cand}`] = 0;
+  });
+  saveData();
+  newPostCands = [];
+  document.getElementById('newPostTitle').value = '';
+  document.getElementById('newPostId').value = '';
+  document.getElementById('newPostCandList').innerHTML = '';
+  alert(`Post "${title}" created!`);
+  renderAdminPanel();
+}
+
+function renderPostManageList() {
+  let html = '';
+  DB.posts.forEach(post => {
+    let candsHtml = post.cands.map(cand => {
+      let cData = DB.candidates[`${post.id}_${cand}`];
+      return `<span class="cand-tag">${cData ? cData.name : cand}
+        <button class="remove-cand" onclick="removeCandidateFromPost('${post.id}','${cand}')" title="Remove">✕</button>
+      </span>`;
+    }).join('');
+    html += `<div class="post-manage-row">
+      <div class="post-header">
+        <span class="post-title-label">📋 ${post.title} <span class="mono" style="font-size:11px;opacity:.5;">[${post.id}]</span></span>
+        <button class="btn btn-danger" style="padding:4px 10px;font-size:12px;" onclick="deletePost('${post.id}')">Delete Post</button>
+      </div>
+      <div style="margin-bottom:6px;">${candsHtml}</div>
+      <div class="add-cand-row">
+        <input type="text" id="addCandInput_${post.id}" placeholder="Add new candidate..." onkeydown="if(event.key==='Enter') addCandidateToPost('${post.id}')">
+        <button class="btn btn-green" style="padding:6px 12px;font-size:12px;" onclick="addCandidateToPost('${post.id}')">+ Add</button>
+      </div>
+    </div>`;
+  });
+  document.getElementById('postManageList').innerHTML = html || '<p style="opacity:.5;font-family:JetBrains Mono;font-size:13px;">No posts found.</p>';
+}
+
+function addCandidateToPost(postId) {
+  let inp = document.getElementById(`addCandInput_${postId}`);
+  let name = inp.value.trim(); if (!name) return;
+  let post = DB.posts.find(p=>p.id===postId);
+  if (post.cands.includes(name)) { alert("Candidate already exists."); return; }
+  post.cands.push(name);
+  DB.candidates[`${postId}_${name}`] = { name };
+  DB.votes[`${postId}_${name}`] = 0;
+  saveData();
+  renderAdminPanel();
+}
+
+function removeCandidateFromPost(postId, candName) {
+  let post = DB.posts.find(p=>p.id===postId);
+  if (post.cands.length <= 2) { alert("Must have at least 2 candidates."); return; }
+  if (!confirm(`Remove "${candName}" from "${post.title}"?`)) return;
+  post.cands = post.cands.filter(c=>c!==candName);
+  delete DB.candidates[`${postId}_${candName}`];
+  delete DB.votes[`${postId}_${candName}`];
+  saveData();
+  renderAdminPanel();
+}
+
+function deletePost(postId) {
+  let post = DB.posts.find(p=>p.id===postId);
+  if (!confirm(`Delete post "${post.title}" and ALL its votes?`)) return;
+  post.cands.forEach(cand => { delete DB.candidates[`${postId}_${cand}`]; delete DB.votes[`${postId}_${cand}`]; });
+  DB.posts = DB.posts.filter(p=>p.id!==postId);
+  saveData();
+  renderAdminPanel();
+}
+
+/* ============================================================
+   ADMIN — TERMINALS
+   ============================================================ */
+function addTerminal() {
+  let id  = document.getElementById('newTerminalId').value.trim();
+  let max = parseInt(document.getElementById('newTerminalMax').value);
+  if (!id || isNaN(max)) { alert("Invalid terminal info."); return; }
+  DB.terminals[id] = { max, used: 0 };
+  saveData();
+  renderAdminPanel();
+}
+
+function deleteTerminal(id) {
+  delete DB.terminals[id];
+  saveData();
+  renderAdminPanel();
+}
+
+/* ============================================================
+   ADMIN — ADMISSIONS
+   ============================================================ */
+function addAdmission() {
+  let raw = document.getElementById('newAdmissionNo').value.trim();
+  if (!raw) return;
+  let nums = raw.split(',').map(s=>s.trim()).filter(Boolean);
+  let added = 0;
+  nums.forEach(adm => { if (!DB.admissions.includes(adm)) { DB.admissions.push(adm); added++; } });
+  if (added === 0) { alert("All numbers already exist."); return; }
+  saveData();
+  document.getElementById('newAdmissionNo').value = '';
+  renderAdminPanel();
+}
+
+function deleteAdmission(adm) {
+  DB.admissions = DB.admissions.filter(a=>a!==adm);
+  delete DB.admissionsUsed[adm];
+  saveData();
+  renderAdminPanel();
+}
+
+/* ============================================================
+   ADMIN — EDIT CANDIDATES (Full Admin)
+   ============================================================ */
+function updateCandSettingsDropdown() {
+  let postId = document.getElementById('editCandPostSelect').value;
+  let post   = DB.posts.find(p=>p.id===postId); if (!post) return;
+  document.getElementById('editCandNameSelect').innerHTML = post.cands.map(cand =>
+    `<option value="${cand}">${DB.candidates[`${postId}_${cand}`]?.name || cand}</option>`
+  ).join('');
+  loadCandidateDetails();
+}
+
+function loadCandidateDetails() {
+  let postId = document.getElementById('editCandPostSelect').value;
+  let cand   = document.getElementById('editCandNameSelect').value;
+  let cData  = DB.candidates[`${postId}_${cand}`]; if (!cData) return;
+  document.getElementById('editCandNewName').value = cData.name;
+}
+
+function saveCandidateSettings() {
+  let postId  = document.getElementById('editCandPostSelect').value;
+  let cand    = document.getElementById('editCandNameSelect').value;
+  let newName = document.getElementById('editCandNewName').value.trim();
+  if (!newName) return;
+  DB.candidates[`${postId}_${cand}`].name = newName;
+  saveData();
+  alert("Candidate name updated!"); renderAdminPanel();
+}
+
+/* ============================================================
+   ADMIN — EDIT VOTES (Full Admin)
+   ============================================================ */
+function updateVoteDropdown() {
+  let postId = document.getElementById('editPostSelect').value;
+  let post   = DB.posts.find(p=>p.id===postId); if (!post) return;
+  document.getElementById('editCandSelect').innerHTML = post.cands.map(cand =>
+    `<option value="${cand}">${DB.candidates[`${postId}_${cand}`]?.name || cand}</option>`
+  ).join('');
+}
+
+function updateVotes() {
+  if (adminRole !== 'full') return;
+  let postId   = document.getElementById('editPostSelect').value;
+  let cand     = document.getElementById('editCandSelect').value;
+  let newVotes = parseInt(document.getElementById('editVoteCount').value);
+  if (isNaN(newVotes) || newVotes < 0) { alert("Enter a valid number."); return; }
+  DB.votes[`${postId}_${cand}`] = newVotes;
+  saveData();
+  document.getElementById('editVoteCount').value = '';
+  renderAdminPanel();
+}
+
+/* ============================================================
+   ADMIN — RESET EVM
+   ============================================================ */
+function resetEVM() {
+  if (!confirm("DANGER: Wipe all votes, reset terminals, clear admission history?")) return;
+  Object.keys(DB.votes).forEach(k => DB.votes[k] = 0);
+  Object.keys(DB.terminals).forEach(k => DB.terminals[k].used = 0);
+  DB.admissionsUsed = {};
+  saveData();
+  renderAdminPanel();
+}
+
+/* ============================================================
+   ADMIN — EXPORT .DOCX
+   ============================================================ */
+async function exportDocx() {
+  if (typeof docx === 'undefined') { alert("docx library not loaded. Check internet."); return; }
+  const { Document, Packer, Paragraph, TextRun, Table, TableRow, TableCell, AlignmentType, BorderStyle, WidthType, ShadingType, HeadingLevel } = docx;
+
+  const border = { style: BorderStyle.SINGLE, size: 1, color: "CCCCCC" };
+  const borders = { top: border, bottom: border, left: border, right: border };
+  const children = [];
+
+  children.push(new Paragraph({ heading: HeadingLevel.HEADING_1, alignment: AlignmentType.CENTER, children: [new TextRun({ text: "Narayana E Techno — Council Election Results", bold: true, size: 32, font: "Arial" })] }));
+  children.push(new Paragraph({ alignment: AlignmentType.CENTER, children: [new TextRun({ text: `Exported: ${new Date().toLocaleString()}`, size: 20, color: "888888", font: "Arial" })] }));
+  children.push(new Paragraph({ children: [new TextRun("")] }));
+
+  DB.posts.forEach(post => {
+    children.push(new Paragraph({ heading: HeadingLevel.HEADING_2, children: [new TextRun({ text: post.title, bold: true, size: 26, font: "Arial" })] }));
+    const rows = [
+      new TableRow({ children: [
+        new TableCell({ borders, width: { size: 5000, type: WidthType.DXA }, shading: { fill: "052E2B", type: ShadingType.CLEAR }, margins: { top:80,bottom:80,left:120,right:120 }, children: [new Paragraph({ children: [new TextRun({ text:"Candidate", bold:true, color:"FFFFFF", font:"Arial" })] })] }),
+        new TableCell({ borders, width: { size: 2000, type: WidthType.DXA }, shading: { fill: "052E2B", type: ShadingType.CLEAR }, margins: { top:80,bottom:80,left:120,right:120 }, children: [new Paragraph({ alignment: AlignmentType.CENTER, children: [new TextRun({ text:"Votes", bold:true, color:"FFFFFF", font:"Arial" })] })] }),
+        new TableCell({ borders, width: { size: 2360, type: WidthType.DXA }, shading: { fill: "052E2B", type: ShadingType.CLEAR }, margins: { top:80,bottom:80,left:120,right:120 }, children: [new Paragraph({ alignment: AlignmentType.CENTER, children: [new TextRun({ text:"Status", bold:true, color:"FFFFFF", font:"Arial" })] })] }),
+      ]})
+    ];
+
+    let maxVotes = Math.max(...post.cands.map(c => DB.votes[`${post.id}_${c}`]||0));
+    post.cands.forEach(cand => {
+      let cData = DB.candidates[`${post.id}_${cand}`];
+      let votes = DB.votes[`${post.id}_${cand}`] || 0;
+      let isWin = votes === maxVotes && maxVotes > 0;
+      rows.push(new TableRow({ children: [
+        new TableCell({ borders, width:{size:5000,type:WidthType.DXA}, margins:{top:80,bottom:80,left:120,right:120}, children:[new Paragraph({children:[new TextRun({text:cData?cData.name:cand,font:"Arial",size:22})]})] }),
+        new TableCell({ borders, width:{size:2000,type:WidthType.DXA}, margins:{top:80,bottom:80,left:120,right:120}, children:[new Paragraph({alignment:AlignmentType.CENTER,children:[new TextRun({text:String(votes),font:"Arial",size:22,bold:isWin})]})] }),
+        new TableCell({ borders, width:{size:2360,type:WidthType.DXA}, margins:{top:80,bottom:80,left:120,right:120}, shading: isWin ? {fill:"D1FAE5",type:ShadingType.CLEAR} : {}, children:[new Paragraph({alignment:AlignmentType.CENTER,children:[new TextRun({text:isWin?"✓ LEADING":"",font:"Arial",size:20,color:"065F46"})]})] }),
+      ]}));
+    });
+    children.push(new Table({ width:{size:9360,type:WidthType.DXA}, columnWidths:[5000,2000,2360], rows }));
+    children.push(new Paragraph({ children:[new TextRun("")] }));
+  });
+
+  const doc = new Document({ sections: [{ properties: { page: { size:{width:12240,height:15840}, margin:{top:1440,right:1440,bottom:1440,left:1440} } }, children }] });
+  const buffer = await Packer.toBuffer(doc);
+  const blob   = new Blob([buffer], { type:"application/vnd.openxmlformats-officedocument.wordprocessingml.document" });
+  const url    = URL.createObjectURL(blob);
+  const a      = document.createElement('a');
+  a.href = url; a.download = `EVM_Results_${new Date().toISOString().split('T')[0]}.docx`;
+  a.click(); URL.revokeObjectURL(url);
+}
+
+/* ============================================================
+   TAB SWITCHER
+   ============================================================ */
+function switchTab(tabId) {
+  document.querySelectorAll('.admin-tab-content').forEach(el=>el.classList.remove('active'));
+  document.querySelectorAll('.admin-tab').forEach(el=>el.classList.remove('active'));
+  document.getElementById('tab-'+tabId).classList.add('active');
+  const tabs = ['results','posts','terminals','admissions','votes'];
+  const idx  = tabs.indexOf(tabId);
+  if (idx >= 0) document.querySelectorAll('.admin-tab')[idx].classList.add('active');
+}
+
+/* ============================================================
+   BOOT
+   ============================================================ */
+window.addEventListener('load', () => {
+  loadData();
+  showScreen('googleAuthScreen'); // Shows the Welcome Screen
+});
+</script>
+</body>
+</html>

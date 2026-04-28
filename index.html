@@ -269,8 +269,8 @@
           <div class="new-post-form">
             <h4>&#43; NEW POST BUILDER</h4>
             <div class="flex-row" style="margin-bottom:10px;">
-              <input type="text" id="newPostTitle" placeholder="Post Title (e.g. Sports Captain)" class="evm-input" style="margin:0; flex:2;">
-              <input type="text" id="newPostId" placeholder="Post ID (e.g. sc)" class="evm-input" style="margin:0; flex:1;">
+              <input type="text" id="newPostTitle" placeholder="Post Title (e.g. Cultural Captain)" class="evm-input" style="margin:0; flex:2;">
+              <input type="text" id="newPostId" placeholder="Post ID (e.g. cc)" class="evm-input" style="margin:0; flex:1;">
             </div>
             <p class="label-xs" style="margin-bottom:6px; opacity:.7;">ADD CANDIDATES TO NEW POST:</p>
             <div id="newPostCandList" class="new-post-cand-list"></div>
@@ -419,10 +419,23 @@ function seedLocalDefaults() {
     { id:'hg',  title:'Head Girl',          cands:['Ananya Gupta','Diya Mehta'],    isHouse:false, house:'' },
     { id:'dhb', title:'Deputy Head Boy',    cands:['Vihaan Patel','Arjun Rao'],     isHouse:false, house:'' },
     { id:'dhg', title:'Deputy Head Girl',   cands:['Myra Iyer','Aanya Reddy'],      isHouse:false, house:'' },
-    { id:'hc_red',    title:'Red House Captain',    cands:['Rohan Bhat','Aditya Nair'],   isHouse:true, house:'red' },
-    { id:'hc_blue',   title:'Blue House Captain',   cands:['Krishna Das','Yash Pillai'],  isHouse:true, house:'blue' },
-    { id:'hc_green',  title:'Green House Captain',  cands:['Aryan Bose','Devansh Sen'],   isHouse:true, house:'green' },
-    { id:'hc_yellow', title:'Yellow House Captain', cands:['Atharv Roy','Shivansh Lal'],  isHouse:true, house:'yellow' }
+    
+    // Split Sports Captains
+    { id:'sc_boy', title:'Sports Captain (Boy)', cands:['Kabir Singh','Rudra Pratap'], isHouse:false, house:'' },
+    { id:'sc_girl', title:'Sports Captain (Girl)', cands:['Tara Desai','Nisha Kapoor'], isHouse:false, house:'' },
+    
+    // Split House Captains
+    { id:'hc_red_boy',    title:'Red House Captain (Boy)',    cands:['Rohan Bhat','Aditya Nair'],   isHouse:true, house:'red' },
+    { id:'hc_red_girl',   title:'Red House Captain (Girl)',   cands:['Riya Sen','Kavya Menon'],     isHouse:true, house:'red' },
+    
+    { id:'hc_blue_boy',   title:'Blue House Captain (Boy)',   cands:['Krishna Das','Yash Pillai'],  isHouse:true, house:'blue' },
+    { id:'hc_blue_girl',  title:'Blue House Captain (Girl)',  cands:['Pooja Rao','Sneha Iyer'],     isHouse:true, house:'blue' },
+    
+    { id:'hc_green_boy',  title:'Green House Captain (Boy)',  cands:['Aryan Bose','Devansh Sen'],   isHouse:true, house:'green' },
+    { id:'hc_green_girl', title:'Green House Captain (Girl)', cands:['Meera Das','Neha Sharma'],    isHouse:true, house:'green' },
+    
+    { id:'hc_yellow_boy', title:'Yellow House Captain (Boy)', cands:['Atharv Roy','Shivansh Lal'],  isHouse:true, house:'yellow' },
+    { id:'hc_yellow_girl',title:'Yellow House Captain (Girl)',cands:['Aditi Verma','Kriti Jain'],   isHouse:true, house:'yellow' }
   ];
   DB.terminals = { 'PC-1': {max:500,used:0}, 'PC-2': {max:500,used:0} };
   DB.admissions = ['123456','2025001','1001','1002'];
@@ -463,18 +476,41 @@ function showAdmissionLogin() {
 }
 
 /* ============================================================
-   VOTER LOGIC
+   VOTER LOGIC (DYNAMIC HOUSE STEP GENERATION)
    ============================================================ */
 function buildUISteps(posts) {
-  let steps = [], hasHouse = false;
+  let steps = [];
+  let houseAsked = false;
   posts.forEach(p => {
     if (p.isHouse) {
-      if (!hasHouse) { steps.push({ key:'hc', label:'House Captain' }); hasHouse = true; }
+      if (!selectedHouse) {
+        if (!houseAsked) { 
+          steps.push({ key:'choose_house', label:'Select House' }); 
+          houseAsked = true; 
+        }
+      } else {
+        if (p.house === selectedHouse) {
+          steps.push({ key: p.id, label: p.title });
+        }
+      }
     } else {
       steps.push({ key: p.id, label: p.title });
     }
   });
   return steps;
+}
+
+function resetHouseSelection() {
+  let UI_STEPS = buildUISteps(DB.posts);
+  let firstHouseStepIdx = UI_STEPS.findIndex(s => {
+    let p = DB.posts.find(x => x.id === s.key);
+    return p && p.isHouse;
+  });
+  if(firstHouseStepIdx !== -1) {
+    currentStepIndex = firstHouseStepIdx;
+  }
+  selectedHouse = null;
+  renderVotingStep();
 }
 
 function terminalLogin() {
@@ -516,7 +552,8 @@ function renderVotingStep() {
   document.getElementById('postStamp').innerText = `BALLOT SECTION ${currentStepIndex + 1}`;
   document.getElementById('terminalStatus').innerText = `TERMINAL: ${currentTerminal} | VOTER: #${currentAdmission}`;
 
-  if (uiStep.key === 'hc' && !selectedHouse) {
+  // If we dynamically generated the house selection step
+  if (uiStep.key === 'choose_house') {
     document.getElementById('postTitle').innerText = "Select Your House";
     document.getElementById('candidatesList').innerHTML = `
       <button class="candidate-tile" style="justify-content:center;" onclick="selectHouse('red')"><div style="width:16px;height:16px;border-radius:50%;background:var(--red);border:1px solid var(--ink);"></div><div class="cand-name" style="margin-left:5px;">Red House</div></button>
@@ -526,8 +563,7 @@ function renderVotingStep() {
     return;
   }
 
-  let postObjId = uiStep.key === 'hc' ? `hc_${selectedHouse}` : uiStep.key;
-  let post = DB.posts.find(p => p.id === postObjId);
+  let post = DB.posts.find(p => p.id === uiStep.key);
   document.getElementById('postTitle').innerText = post.title;
 
   let candsHtml = '';
@@ -538,9 +574,12 @@ function renderVotingStep() {
       <div><div class="cand-name">${cData ? cData.name : cand}</div><div class="cand-pos">${post.title.toUpperCase()}</div></div>
     </button>`;
   });
-  if (uiStep.key === 'hc' && selectedHouse) {
-    candsHtml += `<div style="grid-column:1/-1;margin-top:20px;text-align:center;"><button class="btn" onclick="selectHouse(null)">&#8634; Choose Different House</button></div>`;
+  
+  // Allow user to go back and select a different house if they are on a House post
+  if (post.isHouse) {
+    candsHtml += `<div style="grid-column:1/-1;margin-top:20px;text-align:center;"><button class="btn" onclick="resetHouseSelection()">&#8634; Choose Different House</button></div>`;
   }
+  
   document.getElementById('candidatesList').innerHTML = candsHtml;
 }
 
